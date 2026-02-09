@@ -1,24 +1,16 @@
-# =========================
-# Build stage
-# =========================
-FROM debian:bookworm-slim AS builder
+FROM alpine:3.19 AS builder
 
-ENV DEBIAN_FRONTEND=noninteractive
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    g++ \
-    cmake \
-    gperf \
-    pkg-config \
-    libssl-dev \
-    zlib1g-dev \
-    ca-certificates \
+RUN apk add --no-cache \
     git \
- && rm -rf /var/lib/apt/lists/*
-
-# Set C++ standard explicitly
-ENV CXXFLAGS="-std=gnu++17"
+    cmake \
+    build-base \
+    linux-headers \
+    openssl-dev \
+    zlib-dev \
+    gperf
 
 WORKDIR /build
 
@@ -28,32 +20,30 @@ WORKDIR /build/telegram-bot-api
 
 RUN mkdir build && \
     cd build && \
-    cmake -DCMAKE_INSTALL_PREFIX=/app -DCMAKE_BUILD_TYPE=Release .. && \
-    cmake --build . --target install --parallel $(nproc)
+    cmake -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DCMAKE_CXX_FLAGS="-Os -s" \
+          -DCMAKE_C_FLAGS="-Os -s" \
+          .. && \
+    cmake --build . --target install -j$(nproc) && \
+    strip /usr/local/bin/telegram-bot-api
 
-# =========================
-# Runtime stage
-# =========================
-FROM debian:bookworm-slim AS runtime
+FROM alpine:3.19
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install ONLY runtime deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
+    libstdc++ \
     libssl3 \
-    zlib1g \
-    libstdc++6 \
-    libgcc-s1 \
-    ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+    libcrypto3 \
+    zlib && \
+    rm -rf /var/cache/apk/*
+
+COPY --from=builder /usr/local/bin/telegram-bot-api /app/telegram-bot-api
+
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=builder /app/bin/telegram-bot-api /app/telegram-bot-api
-COPY entrypoint.sh /app/entrypoint.sh
-
-# Ensure executable
-RUN chmod +x /app/entrypoint.sh
+EXPOSE 8081 8082
 
 ENTRYPOINT ["/app/entrypoint.sh"]

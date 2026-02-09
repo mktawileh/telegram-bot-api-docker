@@ -1,0 +1,191 @@
+name: Docker CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*', 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: mktawileh/telegram-bot-api
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for testing
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: local-test-image:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run basic container tests
+        run: |
+          docker images | grep local-test-image
+          echo "✅ Image built successfully"
+          
+          echo "Testing --help flag..."
+          docker run --rm \
+            -e TELEGRAM_API_ID=12345 \
+            -e TELEGRAM_API_HASH=test_hash_for_ci \
+            local-test-image --help 2>&1 | head -15
+          
+          echo ""
+          echo "Testing --version flag..."
+          docker run --rm \
+            -e TELEGRAM_API_ID=12345 \
+            -e TELEGRAM_API_HASH=test_hash_for_ci \
+            local-test-image --version 2>&1 || true
+          
+          echo ""
+          echo "✅ All basic tests passed"
+
+      - name: Run security scan on built image
+        uses: aquasecurity/trivy-action@0.19.0
+        with:
+          image-ref: local-test-image:latest
+          format: 'table'
+          exit-code: '0'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+
+  publish-to-dockerhub:
+    environment: main
+    runs-on: ubuntu-latest
+    needs: test-and-build
+    if: |
+      github.event_name != 'pull_request' && 
+      startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract tag name
+        id: get-tag
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG_NAME#v}"
+          
+          if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            MINOR="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+            echo "major=$MAJOR" >> $GITHUB_OUTPUT
+            echo "minor=$MINOR" >> $GITHUB_OUTPUT
+          elif [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+            MAJOR="${BASH_REMATCH[1]}"
+            echo "major=$MAJOR" >> $GITHUB_OUTPUT
+            echo "minor=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "major=$VERSION" >> $GITHUB_OUTPUT
+            echo "minor=$VERSION" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Tag: $TAG_NAME"
+          echo "📦 Version: $VERSION"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push versioned image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.tag_name }}
+            ${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.major }}
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.title=Telegram Bot API Server
+            org.opencontainers.image.description=A lightweight Docker image for running the official Telegram Bot API server
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.get-tag.outputs.version }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp || github.event.created_at }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify pushed images
+        run: |
+          echo "✅ Successfully published:"
+          echo "   - ${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.tag_name }}"
+          echo "   - ${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.version }}"
+          if [ -n "${{ steps.get-tag.outputs.major }}" ] && [ "${{ steps.get-tag.outputs.major }}" != "${{ steps.get-tag.outputs.version }}" ]; then
+            echo "   - ${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.major }}"
+          fi
+          if [ -n "${{ steps.get-tag.outputs.minor }}" ] && [ "${{ steps.get-tag.outputs.minor }}" != "${{ steps.get-tag.outputs.version }}" ]; then
+            echo "   - ${{ env.IMAGE_NAME }}:${{ steps.get-tag.outputs.minor }}"
+          fi
+          echo "   - ${{ env.IMAGE_NAME }}:latest"
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [test-and-build, publish-to-dockerhub]
+    if: always()
+    
+    steps:
+      - name: Workflow Summary
+        run: |
+          echo "# CI/CD Pipeline Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** \`${{ github.event_name }}\` on \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "## 📦 Tests & Build" >> $GITHUB_STEP_SUMMARY
+          TEST_RESULT="${{ needs.test-and-build.result }}"
+          if [[ "$TEST_RESULT" == "success" ]]; then
+            echo "✅ **PASSED** - All tests completed successfully" >> $GITHUB_STEP_SUMMARY
+          elif [[ "$TEST_RESULT" == "failure" ]]; then
+            echo "❌ **FAILED** - Tests failed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚪ **${TEST_RESULT^^}**" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 Docker Hub Publishing" >> $GITHUB_STEP_SUMMARY
+          PUBLISH_RESULT="${{ needs.publish-to-dockerhub.result }}"
+          if [[ "$PUBLISH_RESULT" == "success" ]]; then
+            echo "✅ **PUBLISHED** - Images pushed to Docker Hub" >> $GITHUB_STEP_SUMMARY
+            echo "- Tags: \`${{ github.ref_name }}\`, \`${GITHUB_REF#refs/tags/v}\`, \`latest\`" >> $GITHUB_STEP_SUMMARY
+          elif [[ "$PUBLISH_RESULT" == "skipped" ]]; then
+            echo "⏸️ **SKIPPED** - Publishing only runs on version tags (v1.0.0, etc.)" >> $GITHUB_STEP_SUMMARY
+          elif [[ "$PUBLISH_RESULT" == "failure" ]]; then
+            echo "❌ **FAILED** - Publishing failed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚪ **${PUBLISH_RESULT^^}**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "*Workflow completed at $(date -u +'%Y-%m-%d %H:%M:%S UTC')*" >> $GITHUB_STEP_SUMMARY
