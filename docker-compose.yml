@@ -2,13 +2,10 @@ name: telegram-bot-api
 
 services:
   api:
-    image: telegram-bot-api
+    image: mktawileh/telegram-bot-api:9.4
     container_name: telegram-bot-api
-    build:
-      context: .
-      dockerfile: Dockerfile
     ports:
-      - 8080:8080
+      - 8888:8080
       - 8787:8787
     environment:
       - TELEGRAM_API_ID=${TELEGRAM_API_ID}

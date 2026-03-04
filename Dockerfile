@@ -18,6 +18,8 @@ RUN git clone --recursive https://github.com/tdlib/telegram-bot-api.git
 
 WORKDIR /build/telegram-bot-api
 
+RUN git checkout -b v9.5 447bf0835622d4a431bec96ba32847d1c0ed740e
+
 RUN mkdir build && \
     cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release \
